@@ -1,0 +1,18 @@
+services:
+  cli-bridge:
+    image: thebuildguild/cli-bridge:1.6.2-claude
+    ports:
+      - "3900:3900"
+    env_file:
+      - .env
+    environment:
+      PORT: 3900
+      BACKEND: claude
+      CLAUDE_BIN: claude
+      API_DOCS_SERVERS: http://localhost:3900,https://your.domain.com
+    volumes:
+      - cli_data:/data
+    restart: unless-stopped
+
+volumes:
+  cli_data:
