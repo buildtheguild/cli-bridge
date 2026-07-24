@@ -1,20 +1,26 @@
 # CLIBridge
 
-**HTTP gateway that turns the OpenAI Codex CLI or Anthropic Claude Code CLI into a standard OpenAI-compatible API.**
+**HTTP gateway that turns the OpenAI Codex CLI or Anthropic Claude Code CLI into a standard OpenAI-compatible API — with a 100% local, self-hosted Whisper audio-transcription endpoint built in.**
 
-Use your own **ChatGPT Plus** or **Claude Pro** subscription. CLIBridge handles authentication, streaming, image inputs, rate limiting, health monitoring, and SaaS-based activation.
+Use your own **ChatGPT Plus** or **Claude Pro** subscription. CLIBridge handles authentication, streaming, image inputs, audio transcription, rate limiting, health monitoring, and SaaS-based activation.
+
+Audio sent to `POST /v1/audio/transcriptions` is transcribed entirely inside the container by a bundled `whisper.cpp` — it is **never** sent to OpenAI, Anthropic, or any other external service.
 
 **Docker Hub:** https://hub.docker.com/r/thebuildguild/cli-bridge
+
+**Source / issues:** https://github.com/buildtheguild/cli-bridge
 
 **HTTP endpoints:** [here](#http-endpoints)
 
 ## Tags
 
-| Tag                      | CLI backends   | Size    |
-| ------------------------ | -------------- | ------- |
-| `latest`, `1.6.2`        | Codex + Claude | ~930 MB |
-| `claude`, `1.6.2-claude` | Claude only    | ~590 MB |
-| `codex`, `1.6.2-codex`   | Codex only     | ~420 MB |
+| Tag                      | CLI backends   | Notes                                          |
+| ------------------------ | -------------- | ----------------------------------------------- |
+| `latest`, `2.0.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
+| `claude`, `2.0.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
+| `codex`, `2.0.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
+
+As of `2.0.0`, every tag also bundles `whisper.cpp` and a baked-in Whisper model (`base` by default). The `claude` variant measures ~340MB; `codex` and the combined `latest`/`full` image are in a similar range, a bit larger for `full` since it installs both CLIs. Whisper adds roughly the size of the baked-in model on top of that (~150MB for `base`) — see [Audio transcription](#7-audio-transcription-optional-plan-gated) below to change the baked-in model size, or swap models at runtime without rebuilding.
 
 Use a versioned tag in production.
 
@@ -63,7 +69,7 @@ Values defined under `environment:` take precedence over values from `env_file`,
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:1.6.2-codex
+    image: thebuildguild/cli-bridge:2.0.0-codex
     ports:
       - "3900:3900"
     env_file:
@@ -86,7 +92,7 @@ volumes:
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:1.6.2-claude
+    image: thebuildguild/cli-bridge:2.0.0-claude
     ports:
       - "3900:3900"
     env_file:
@@ -111,7 +117,7 @@ Both CLIs are installed, but only one backend is active at a time.
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:1.6.2
+    image: thebuildguild/cli-bridge:2.0.0
     ports:
       - "3900:3900"
     env_file:
@@ -247,6 +253,37 @@ or:
 CLAUDE_CODE_VERSION
 ```
 
+### 7. Audio transcription (optional, plan-gated)
+
+`POST /v1/audio/transcriptions` doesn't depend on your Codex/Claude subscription at all — it's backed entirely by the `whisper.cpp` binary and model baked into the image, and nothing is sent to OpenAI, Anthropic, or any other external service.
+
+It does require your CLIBridge plan to include Whisper. If it doesn't, both this endpoint and `GET /v1/audio/status` return `403`, and the dashboard hides the Whisper status card entirely rather than showing it locked.
+
+```bash
+curl http://localhost:3900/v1/audio/transcriptions \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  -F "file=@voice-note.ogg"
+```
+
+Response formats follow OpenAI's Whisper endpoint shape — `json` (default), `text`, or `verbose_json` with per-segment timestamps:
+
+```bash
+curl http://localhost:3900/v1/audio/transcriptions \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  -F "file=@voice-note.ogg" \
+  -F "response_format=verbose_json" \
+  -F "language=en"
+```
+
+Check readiness anytime with `GET /v1/audio/status` — binary/model/ffmpeg health, live capacity, and usage metrics, independent of the `HEALTH_VERBOSE_ENABLED` flag used by `/v1/health`:
+
+```bash
+curl http://localhost:3900/v1/audio/status \
+  -H "Authorization: Bearer $BRIDGE_TOKEN"
+```
+
+**Switching the Whisper model without rebuilding:** download a different `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp, mount it into the container (e.g. onto the `cli_data` volume), and set `WHISPER_MODEL_PATH` to the mounted path. To change which model ships **baked into the image by default**, rebuild with `--build-arg WHISPER_MODEL=small` (or `tiny`/`medium`/`large-v3`) — bigger models are more accurate but need more RAM/CPU per request, so pick to match your host.
+
 ## Configuration
 
 Configuration values can be set in `.env`, loaded through `env_file`, or placed directly under `environment:` in `docker-compose.yml`.
@@ -337,7 +374,7 @@ The following variables control the service name and descriptions shown in Swagg
 
 ```dotenv
 APP_TITLE=CLIBridge
-APP_DESCRIPTION=OpenAI-compatible gateway for Codex and Claude CLI
+APP_DESCRIPTION=HTTP gateway for AI CLIs (Codex & Claude) with an OpenAI-compatible API, streaming, image support, and local audio transcription (whisper.cpp — audio never leaves this server).
 APP_SERVICE_NAME=cli-bridge
 ```
 
@@ -384,6 +421,8 @@ BACKEND=codex
 `BACKEND` determines which provider handles requests. The `*_BIN` variables only define the executable used by that provider.
 
 The binary variable for the inactive backend is ignored.
+
+Whisper audio transcription is independent of `BACKEND` entirely — it's always available (subject to plan entitlement, see below) regardless of which CLI provider is selected, and the Docker image bundles `whisper.cpp` in every variant (`codex`, `claude`, and `latest`/full).
 
 ### Codex CLI
 
@@ -470,6 +509,84 @@ Example:
 CLAUDE_ALLOWED_MODELS=claude-sonnet-4-6,claude-opus-4-6
 ```
 
+### Audio transcription (Whisper)
+
+These variables configure `POST /v1/audio/transcriptions` and `GET /v1/audio/status`, both always available regardless of `BACKEND` (subject to plan entitlement — see below).
+
+#### `WHISPER_MODEL_PATH`
+
+Path to the `.bin` ggml model used for transcription.
+
+Default:
+
+```dotenv
+WHISPER_MODEL_PATH=/app/models/ggml-base.bin
+```
+
+Matches whichever model was baked into the image via the `WHISPER_MODEL` build argument. Point this at a different mounted model file to switch models without rebuilding.
+
+#### `WHISPER_LANGUAGE`
+
+Default ISO-639-1 language used when a request doesn't specify one.
+
+Default:
+
+```dotenv
+WHISPER_LANGUAGE=auto
+```
+
+`auto` lets whisper.cpp detect the language per request. Pinning a specific language skips detection and can improve both speed and accuracy for single-language deployments.
+
+#### `WHISPER_THREADS`
+
+Pins whisper.cpp's CPU thread count per transcription job.
+
+Left unset, whisper.cpp auto-detects (typically `min(4, core count)`). Set explicitly to cap CPU usage on a small or shared host, for example:
+
+```dotenv
+WHISPER_THREADS=1
+```
+
+#### `WHISPER_MAX_CONCURRENT`
+
+Concurrent transcription jobs allowed at once.
+
+Default:
+
+```dotenv
+WHISPER_MAX_CONCURRENT=1
+```
+
+Requests beyond this limit receive `429 Too Many Requests`. Keep this low on small or shared hosts — a transcription job is CPU/RAM-heavy, and this also protects concurrent chat requests running on the same box from resource starvation.
+
+#### `MAX_AUDIO_BYTES`
+
+Maximum upload size for `POST /v1/audio/transcriptions`, in bytes.
+
+Default (25 MB, matching OpenAI's limit):
+
+```dotenv
+MAX_AUDIO_BYTES=26214400
+```
+
+#### `WHISPER_BIN`, `FFMPEG_BIN`, `WHISPER_TIMEOUT_MS`, `WHISPER_HEALTH_TIMEOUT_MS`
+
+Advanced settings that rarely need changing — binary paths and timeouts for the ffmpeg decode step and the whisper.cpp run itself.
+
+#### Build-time model selection
+
+`WHISPER_MODEL` (default `base`) and `WHISPER_CPP_VERSION` are Docker build arguments, not runtime environment variables — they control which model size and which whisper.cpp release get baked into the image. Bigger models (`small`, `medium`, `large-v3`) are more accurate but need more RAM/CPU per request. See [Manual image build / push](#manual-image-build--push)-style rebuild instructions in `docs/dockerhub.md` if you maintain your own build.
+
+### Plan entitlement
+
+`POST /v1/audio/transcriptions` and `GET /v1/audio/status` require a CLIBridge plan that includes Whisper. If your plan doesn't include it, both endpoints return:
+
+```json
+{ "error": "whisper_not_entitled", "message": "Your current plan does not include audio transcription (Whisper). Upgrade your plan to enable it." }
+```
+
+with HTTP status `403`, and the dashboard hides the Whisper status card entirely instead of showing it locked. This is unrelated to `BACKEND`/CLI authentication — it's a separate entitlement tied to your CLIBridge subscription plan.
+
 ### Advanced configuration
 
 CLIBridge also supports optional advanced settings for:
@@ -550,16 +667,18 @@ The following route does not require a bridge token:
 GET /
 ```
 
-All endpoints except `/v1/license/*` also require an activated CLIBridge license.
+All endpoints except `/v1/license/*` also require an activated CLIBridge license. `POST /v1/audio/transcriptions` and `GET /v1/audio/status` additionally require a plan that includes Whisper — see [Plan entitlement](#plan-entitlement) above.
 
 ### OpenAI-compatible endpoints
 
-| Method | Path                          | Description                                              |
-| ------ | ----------------------------- | -------------------------------------------------------- |
-| `GET`  | `/v1/models`                  | List available models                                    |
-| `POST` | `/v1/models/refresh`          | Probe the active CLI and refresh the model cache         |
-| `POST` | `/v1/chat/completions`        | Create a chat completion using JSON or SSE streaming     |
-| `POST` | `/v1/chat/completions/upload` | Create a chat completion with one multipart image upload |
+| Method | Path                           | Description                                                |
+| ------ | ------------------------------ | ------------------------------------------------------------ |
+| `GET`  | `/v1/models`                   | List available models                                        |
+| `POST` | `/v1/models/refresh`           | Probe the active CLI and refresh the model cache             |
+| `POST` | `/v1/chat/completions`         | Create a chat completion using JSON or SSE streaming         |
+| `POST` | `/v1/chat/completions/upload`  | Create a chat completion with one multipart image upload     |
+| `POST` | `/v1/audio/transcriptions`     | Transcribe audio — 100% local whisper.cpp, plan-gated        |
+| `GET`  | `/v1/audio/status`             | Whisper backend health, capacity, and usage metrics          |
 
 ### CLI authentication endpoints
 
@@ -590,7 +709,7 @@ All endpoints except `/v1/license/*` also require an activated CLIBridge license
 | Method | Path                      | Description                                            |
 | ------ | ------------------------- | ------------------------------------------------------ |
 | `GET`  | `/v1/health`              | Basic health status                                    |
-| `GET`  | `/v1/health?details=true` | Expanded CLI, watchdog, and license health status      |
+| `GET`  | `/v1/health?details=true` | Expanded CLI, whisper, watchdog, and license health status |
 | `GET`  | `/v1/metrics`             | Live request and token counters                        |
 | `GET`  | `/v1/watchdog/status`     | Watchdog configuration and unhealthy-check count       |
 | `GET`  | `/v1/insights/latest`     | Get the latest generated insight report                |
@@ -621,8 +740,9 @@ GET /
 * Authentication and activation state are stored in the Docker volume mounted at `/data`.
 * Keep the `cli_data` volume persistent between container restarts and upgrades.
 * Do not run `docker compose down -v` unless you intentionally want to erase the activation and CLI authentication state.
-* Use image version `1.6.2` or newer.
+* Use image version `2.0.0` or newer.
 * Use a versioned Docker image tag in production instead of relying on `latest`.
-* The combined image contains both CLIs but only one backend can process requests at a time.
+* The combined image contains both CLIs but only one backend can process requests at a time. Whisper audio transcription is available regardless of which backend is selected.
 * Protect `BRIDGE_TOKEN` as you would protect an API key.
 * Place CLIBridge behind HTTPS before exposing it publicly.
+* Audio sent to `POST /v1/audio/transcriptions` never leaves the container — there is no external API call for transcription.
