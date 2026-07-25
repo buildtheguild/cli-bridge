@@ -4,6 +4,64 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.1.0] – 2026-07-25
+
+Follow-up release on top of `2.0.0`'s Whisper support: turns the single baked-in model into a full model-management system (download/switch/delete from the dashboard or API, per-request override), adds cancellation for both downloads and in-flight transcriptions, adds a Logs tab for diagnosing failures, and fixes several bugs found while exercising all of that against real hardware and real network conditions.
+
+### Added
+
+- **In-dashboard Whisper model switching** — `GET /v1/audio/models` lists a curated catalog (`tiny`/`base`/`small`/`medium`/`large-v3-turbo`/`large-v3`) with size and downloaded/active state; `POST /v1/audio/models/:name/select` switches immediately if the model is already available, or downloads it from https://huggingface.co/ggerganov/whisper.cpp straight to the persistent `/data` volume and switches automatically once done (`GET /v1/audio/models` reports live progress for polling); `DELETE /v1/audio/models/:name` frees disk space. Downloaded models and the active selection live on `/data`, so they survive container recreation and image updates — `WHISPER_MODEL_PATH` is now only the fallback used before any selection has been made. The dashboard's Whisper card gained a model dropdown with a live download progress bar and a confirmation modal before deleting.
+- **Per-request model override on `POST /v1/audio/transcriptions`** — the `model` field (previously accepted-but-ignored, only there for OpenAI-client compatibility) now actually selects which downloaded model transcribes that one request, without changing the dashboard's globally active ("default") model. Only accepts already-downloaded catalog names — never triggers a download mid-request, since that could block the caller for minutes; an undownloaded or unknown model returns a clear `400` instead. Omitting `model` (or sending OpenAI's fixed `"whisper-1"` placeholder) uses whichever model is currently active. Swagger now shows this as a dropdown of catalog names instead of a free-text field marked "ignored."
+- **`POST /v1/audio/cancel`** — aborts whatever transcription request(s) are currently running (via Node's native `AbortSignal` support on the spawned `ffmpeg`/`whisper-cli` child processes), freeing the capacity slot immediately instead of waiting out `WHISPER_TRANSCRIBE_TIMEOUT_MS` (now up to 10 minutes by default). The cancelled request itself receives a clear `400 "Transcription was cancelled."` response rather than a timeout error. The dashboard's Capacity tile shows a Cancel button whenever a job is active.
+- **`POST /v1/audio/models/cancel`** — aborts an in-progress model download (cleans up the partial file, leaves the previously-active model unchanged) instead of the dashboard just disabling the picker until it finished or failed on its own.
+- **`WHISPER_TRANSCRIBE_TIMEOUT_MS`** — the actual whisper-cli inference step now has its own, far more generous timeout (default 600000ms/10min) separate from `WHISPER_TIMEOUT_MS` (now decode-only, still 120000ms). Transcription time scales with both audio length and model size; a larger/more-accurate model transcribing 1-2 minutes of audio can take several minutes on modest CPU hardware, and reusing the short decode timeout for that was cutting off legitimate large-model transcriptions with `whisper-cli timed out after 120000ms` rather than just catching genuine hangs.
+- **`GET /v1/logs`** — new in-memory ring buffer (last 200 entries) of notable operational events, separate from `docker logs`/stdout so an operator can see *why* something failed straight from the dashboard instead of just a bare failure count. Wired into the Whisper failure points: decode failures, missing-model errors, whisper-cli failures/timeouts (including the exact `whisper-cli timed out after ...` message), and model-download failures/retries. Resets on restart — it's a recent-events view, not persistent log storage. The dashboard has a new "Logs" tab showing these as a scrollable table (time/level/source/message), polled on the existing 20s cycle.
+- **Mobile-responsive dashboard navigation** — the tab row (now five items: Account, Claude, Codex, Logs, API Docs) collapses into a hamburger-triggered dropdown menu below a 640px viewport width instead of relying on horizontal scroll, which was the only affordance before and didn't make it obvious more tabs existed off-screen.
+- User-facing text (dashboard, Swagger docs, and API error/status messages) no longer says "local" or "whisper.cpp" — rephrased as "Whisper service" throughout, since the implementation detail isn't relevant to API consumers or dashboard operators. The dashboard's "Model" label is now "Default model," since a request can now override it per-call.
+
+### Fixed
+
+- **The Whisper model picker could silently disappear from the dashboard after a page reload** — `refreshDashboardData()` gated the `/v1/audio/models` fetch behind the *previous* `/v1/audio/status` call's forbidden-check, so any hiccup on one request could blank the other. The two are now fetched independently, each determining "forbidden" from its own response.
+- **Large model downloads (1.5GB+) could fail with a bare `terminated` error and no retry** — a dropped connection partway through a multi-minute download is an expected, transient failure mode, not a bug. Downloads now retry up to 3 times with backoff before surfacing an error.
+- **A shorter card (e.g. Claude's) left a dead gap at the bottom when a sibling card (e.g. Whisper's, with its variable-height model picker) stretched both to equal height** — card bodies are now flex columns with the trailing action block (button / model picker) pinned to the bottom via `margin-top:auto`, so the slack collects invisibly above it instead of appearing as empty space below.
+
+---
+
+## [2.0.0] – 2026-07-24
+
+Major version bump: this release adds a new local transcription capability (not just a bridge to Codex/Claude) and grows the Docker image with a compiled `whisper.cpp` binary and a baked-in model — a large enough surface and image-composition change to warrant a major version rather than a minor one.
+
+### Added
+
+- **`POST /v1/audio/transcriptions`** — OpenAI-compatible audio transcription endpoint backed by a **100% locally-run** `whisper.cpp` — uploaded audio is decoded and transcribed entirely inside the container and is never sent to OpenAI, Anthropic, or any other external service, and there's no external API cost. Accepts the same multipart `file`/`model`/`language`/`prompt`/`response_format` shape as OpenAI's Whisper endpoint (`json`, `text`, and `verbose_json` with segment timestamps are supported), so existing Whisper clients can point at this bridge by changing only the base URL. Uploaded audio is decoded to the 16kHz mono PCM WAV whisper.cpp requires via `ffmpeg` (handles mp3/m4a/ogg/opus/webm/wav and other common voice-note formats) before transcription. A configurable concurrency guard (`WHISPER_MAX_CONCURRENT`, default 1) protects small/shared deployments from a transcription job starving concurrent chat requests. The `language` field is now a documented enum in Swagger (renders as a dropdown of every ISO-639-1 code whisper.cpp supports, `auto` first/default) instead of a freeform string. See `docs/config.md` for the full `WHISPER_*`/`FFMPEG_BIN`/`MAX_AUDIO_BYTES` env var reference, including the build-time `WHISPER_MODEL`/`WHISPER_CPP_VERSION` Dockerfile args that pick which model gets baked into the image.
+- **`GET /v1/audio/status`** — ungated Whisper backend status endpoint (binary/model/ffmpeg present and working, live capacity, usage metrics), on the same pattern as `GET /v1/watchdog/status`. The console dashboard now shows a Whisper card next to the Claude/Codex CLI cards, polled on the existing 20s metrics cycle.
+- **`WHISPER_LANGUAGE`** — default language used when a transcription request doesn't specify one (default `auto`). Pinning a language skips per-request detection, which can improve both speed and accuracy for single-language deployments.
+- **`WHISPER_THREADS`** — pins whisper.cpp's CPU thread count per job. Left unset it auto-detects; set explicitly (e.g. `1`) to cap CPU usage on a small/shared VPS.
+- **Runtime model switching without a rebuild** — `WHISPER_MODEL_PATH` can point at any `ggml-*.bin` mounted into the container (e.g. downloaded from https://huggingface.co/ggerganov/whisper.cpp onto the `/data` volume). The `WHISPER_MODEL` Dockerfile build arg only controls which model ships baked in *by default*; it was never required to rebuild just to try a different model size.
+- **Whisper is plan-gated** — `POST /v1/audio/transcriptions` and `GET /v1/audio/status` now require a CLIBridge plan that includes Whisper; a plan that doesn't include it gets `403 { error: "whisper_not_entitled" }` on both routes. The dashboard's Whisper card is hidden entirely (not shown locked/grayed) when the plan doesn't include it, distinguishing a `403` from a genuine connectivity/health problem.
+
+### Fixed
+
+- **Claude verification-code input lost anything typed or pasted into it within ~3.5s** — the wizard's session-status poll (`pollProviderSession`) re-renders the whole step's HTML on every cycle via `setHtml`, which fully replaces the DOM node the `<input id="claude-code-input">` lives in, wiping its value and dropping focus. `renderWizard()` now captures the input's value, focus state, and cursor position immediately before that re-render and restores them immediately after, so typing or pasting a code no longer races the poll.
+
+### Docs
+
+- Clarified throughout (README, `docs/dockerhub.md`, `docs/config.md`, Swagger tag/operation descriptions, the app's default `APP_DESCRIPTION`) that audio transcription is fully local and never proxied to any external API — this wasn't obvious enough from the original wording.
+
+---
+
+## [1.6.3] – 2026-07-23
+
+### Fixed
+
+- **Claude backend: every request started failing with `claude failed code=1 stderr=(none)` after updating the Claude CLI to 2.1.218** — `@anthropic-ai/claude-code` raised its minimum Node requirement from `>=18.0.0` (the previously baked-in `2.1.173`) to `>=22.0.0` as of `2.1.218`, but the image's `node:20-alpine` base (both build and runtime stages) no longer met it, so the CLI failed to run and produced no diagnostic output at all. The image now builds on `node:22-alpine`, and the baked-in `CLAUDE_CODE_VERSION` build arg is bumped to `2.1.218` to match. Verified directly against a rebuilt image: `node --version` reports `v22.23.1`, and the exact `--print --output-format stream-json --verbose` invocation the bridge sends now returns a clean, well-formed `result` event instead of a silent crash.
+
+### Infrastructure
+
+- **`CLAUDE_CODE_VERSION` build arg bumped to `2.1.218`** — the in-container "Update" button (see 1.6.0) only patches a running container's writable layer; it doesn't change what gets baked into freshly built or redeployed images. Rebuilding with the old `CLAUDE_CODE_VERSION=2.1.173` default on the new `node:22-alpine` base would have worked too, but pinning the baked-in version to what's now current avoids immediately hitting an "Update available" banner on a fresh deploy.
+
+---
+
 ## [1.6.2] – 2026-07-10
 
 ### Fixed
