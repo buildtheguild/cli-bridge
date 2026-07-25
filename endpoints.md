@@ -22,6 +22,8 @@ Everything else, including every `/v1/license/*` route, requires
 | `GET /v1/license/*`, `POST /v1/license/*` | **Yes** | No (`@SkipLicenseCheck`) |
 | `GET /v1/auth/*`, `GET /v1/auth/sessions/:id` | Yes | Yes |
 | Everything under `/v1` on `CodexController` (health, metrics, watchdog, insights, models, chat) | Yes | Yes |
+| `GET /v1/logs` | Yes | Yes |
+| Everything under `/v1/audio/*` (`AudioController`, `WhisperModelsController`) | Yes | Yes, **plus** `WhisperEntitlementGuard` — the license must also carry `limits.whisper_enabled: 1` from the SaaS policy check, or every route here returns `403 { error: "whisper_not_entitled" }` regardless of license validity. See `docs/license.md`. |
 
 `GET /v1/license/status` being reachable without a valid license (but still
 needing the token) is what lets the operator console show license state
@@ -84,9 +86,10 @@ All CLI-auth and CLI-update routes are additionally rate-limited per source IP.
 
 ## Diagnostics
 
-- `GET /v1/health` — basic `{ ok, time }`; `?details=true` (requires `HEALTH_VERBOSE_ENABLED=true`) adds version, memory, `cli`, `watchdog`, `license`. `cli.quotaLeft` is always `null` — neither CLI exposes machine-readable remaining quota.
+- `GET /v1/health` — basic `{ ok, time }`; `?details=true` (requires `HEALTH_VERBOSE_ENABLED=true`) adds version, memory, `cli`, `whisper`, `watchdog`, `license`. `cli.quotaLeft` is always `null` — neither CLI exposes machine-readable remaining quota.
 - `GET /v1/watchdog/status` — watchdog config + consecutive unhealthy check count
 - `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`. Lightweight — no AI calls.
+- `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Currently populated by the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries) — not a general application log. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only (no `WhisperEntitlementGuard`, since it's not itself a Whisper feature).
 - `GET /v1/insights/latest` — most recent insight report, or `null`
 - `GET /v1/insights/history?limit=10` — last N reports, newest first
 - `POST /v1/insights/generate` — triggers an out-of-schedule insight report, returns it
@@ -148,3 +151,74 @@ Auto-summary:
 - If input exceeds `SUMMARY_THRESHOLD_TOKENS`, the response includes a top-level `summary` string (non-streaming only).
 
 Model validation is strict: if `model` is provided and does not map to a known cached/allowed model, the bridge returns HTTP 400.
+
+## Audio / Whisper (`/v1/audio`, `AuthGuard` + `WhisperEntitlementGuard`)
+
+100% local — audio is decoded and transcribed entirely inside the container via a bundled `whisper.cpp`; nothing is sent to OpenAI, Anthropic, or any other external service. Independent of `BACKEND` — available regardless of which CLI (Codex or Claude) is active. Every route below additionally requires `limits.whisper_enabled: 1` on the license (see the table above); a plan without it gets `403 { error: "whisper_not_entitled" }` on all of them.
+
+### `POST /v1/audio/transcriptions`
+
+OpenAI-compatible transcription. `multipart/form-data`:
+
+- `file` (required) — audio file, any format ffmpeg can decode (mp3/m4a/wav/ogg/opus/webm/...)
+- `model` (optional) — per-request override; must be an **already-downloaded** catalog name (see `GET /v1/audio/models`). Omitted, empty, or OpenAI's fixed `"whisper-1"` placeholder uses whichever model is currently active. An unknown or undownloaded name returns HTTP 400 — this never triggers a download mid-request. Does **not** change the globally active model.
+- `language` (optional) — ISO-639-1 code; omitted uses `WHISPER_LANGUAGE` (default `auto`, i.e. per-request detection)
+- `prompt` (optional) — vocabulary/context hint passed through to whisper.cpp
+- `response_format` (optional) — `json` (default, `{ text }`), `text` (raw `text/plain` body), or `verbose_json` (`{ task, language, duration, text, segments }`, segments include per-utterance start/end timestamps)
+
+Concurrency is capped by `WHISPER_MAX_CONCURRENT` (default 1); requests beyond that get HTTP 429. Decode uses `WHISPER_TIMEOUT_MS` (default 120000); the whisper-cli inference step uses the separate, more generous `WHISPER_TRANSCRIBE_TIMEOUT_MS` (default 600000 / 10 min) — transcription time scales with both audio length and model size, so a large model on modest hardware can legitimately take minutes.
+
+### `POST /v1/audio/cancel`
+
+Aborts whatever transcription request(s) are currently running, via `AbortSignal` on the spawned `ffmpeg`/`whisper-cli` processes. Frees the capacity slot immediately. The in-flight request(s) receive `400 { message: "Transcription was cancelled." }` instead of completing or timing out. Returns `400` if nothing is currently running. Response: `{ cancelled: <count> }`.
+
+### `GET /v1/audio/status`
+
+Health/capacity snapshot — not gated by `HEALTH_VERBOSE_ENABLED` (unlike the verbose fields on `GET /v1/health`), only by the Whisper entitlement above.
+
+```json
+{
+  "available": true,
+  "bin": "whisper-cli",
+  "binaryOk": true,
+  "model": { "name": "base", "path": "/app/models/ggml-base.bin", "exists": true, "sizeBytes": 147964211 },
+  "ffmpeg": { "bin": "ffmpeg", "ok": true },
+  "maxConcurrent": 1,
+  "activeJobs": 0,
+  "metrics": { "totalRequests": 12, "successCount": 11, "failedRequests": 1, "avgProcessingMs": 4200 }
+}
+```
+
+`available` is `true` only if the model file exists, `whisper-cli --help` runs successfully, and `ffmpeg -version` runs successfully.
+
+### `GET /v1/audio/models`
+
+Static catalog (`tiny`/`base`/`small`/`medium`/`large-v3-turbo`/`large-v3`) plus live state.
+
+```json
+{
+  "activeModel": "base",
+  "builtInModel": "base",
+  "downloading": null,
+  "models": [
+    { "name": "tiny", "label": "Tiny — fastest, lowest accuracy", "approxBytes": 78000000, "downloaded": false, "active": false, "builtIn": false },
+    { "name": "base", "label": "Base — fast, good baseline", "approxBytes": 148000000, "downloaded": true, "active": true, "builtIn": true }
+  ]
+}
+```
+
+`builtInModel` is whatever `WHISPER_MODEL_PATH` resolves to (the model baked into the image); `activeModel` is whatever was last selected via the endpoint below, defaulting to `builtInModel` if nothing has been selected yet. `downloading` is `null`, or `{ name, status, downloadedBytes, totalBytes, error? }` with `status` one of `downloading` / `done` / `failed` / `cancelled` — poll this endpoint while `status === "downloading"` to track progress.
+
+### `POST /v1/audio/models/:name/select`
+
+If `:name` is already downloaded (or is `builtInModel`), activates it immediately and returns `{ status: "active" }`. Otherwise starts a background download from `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-:name.bin` to `$HOME/whisper-models/` on the persistent `/data` volume, returns `{ status: "downloading" }` immediately (not awaited — a large model can take minutes), and activates automatically once it completes. Retries the download up to 3 times with backoff on a dropped connection before surfacing a `failed` state. Only one download runs at a time — a second `select()` while one is in flight gets HTTP 429. Unknown `:name` returns HTTP 400.
+
+The active selection is written to `$HOME/whisper-active-model.json` on `/data`, so it survives container recreation and image updates.
+
+### `POST /v1/audio/models/cancel`
+
+Aborts an in-progress model download, cleans up the partial file, and leaves the previously-active model unchanged (`downloading.status` becomes `cancelled`). Returns HTTP 400 if nothing is currently downloading.
+
+### `DELETE /v1/audio/models/:name`
+
+Frees disk space. Returns HTTP 400 if `:name` is `builtInModel` (baked into the image, nothing to delete) or the currently active model (switch away first).
