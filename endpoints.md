@@ -23,7 +23,7 @@ Everything else, including every `/v1/license/*` route, requires
 | `GET /v1/auth/*`, `GET /v1/auth/sessions/:id` | Yes | Yes |
 | Everything under `/v1` on `CodexController` (health, metrics, watchdog, insights, models, chat) | Yes | Yes |
 | `GET /v1/logs` | Yes | Yes |
-| Everything under `/v1/audio/*` (`AudioController`, `WhisperModelsController`) | Yes | Yes, **plus** `WhisperEntitlementGuard` — the license must also carry `limits.whisper_enabled: 1` from the SaaS policy check, or every route here returns `403 { error: "whisper_not_entitled" }` regardless of license validity. See `docs/license.md`. |
+| Everything under `/v1/audio/*` (`AudioController`, `WhisperModelsController`) | Yes | Yes, **plus** a plan-entitlement check — a valid license on a plan that doesn't include Whisper still gets `403 { error: "whisper_not_entitled" }` on every route here. |
 
 `GET /v1/license/status` being reachable without a valid license (but still
 needing the token) is what lets the operator console show license state
@@ -89,7 +89,7 @@ All CLI-auth and CLI-update routes are additionally rate-limited per source IP.
 - `GET /v1/health` — basic `{ ok, time }`; `?details=true` (requires `HEALTH_VERBOSE_ENABLED=true`) adds version, memory, `cli`, `whisper`, `watchdog`, `license`. `cli.quotaLeft` is always `null` — neither CLI exposes machine-readable remaining quota.
 - `GET /v1/watchdog/status` — watchdog config + consecutive unhealthy check count
 - `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`. Lightweight — no AI calls.
-- `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Currently populated by the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries) — not a general application log. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only (no `WhisperEntitlementGuard`, since it's not itself a Whisper feature).
+- `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Currently populated by the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries) — not a general application log. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only — no Whisper plan entitlement required, since it's not itself a Whisper feature.
 - `GET /v1/insights/latest` — most recent insight report, or `null`
 - `GET /v1/insights/history?limit=10` — last N reports, newest first
 - `POST /v1/insights/generate` — triggers an out-of-schedule insight report, returns it
@@ -152,9 +152,9 @@ Auto-summary:
 
 Model validation is strict: if `model` is provided and does not map to a known cached/allowed model, the bridge returns HTTP 400.
 
-## Audio / Whisper (`/v1/audio`, `AuthGuard` + `WhisperEntitlementGuard`)
+## Audio / Whisper (`/v1/audio`, requires auth + a plan that includes Whisper)
 
-100% local — audio is decoded and transcribed entirely inside the container via a bundled `whisper.cpp`; nothing is sent to OpenAI, Anthropic, or any other external service. Independent of `BACKEND` — available regardless of which CLI (Codex or Claude) is active. Every route below additionally requires `limits.whisper_enabled: 1` on the license (see the table above); a plan without it gets `403 { error: "whisper_not_entitled" }` on all of them.
+100% local — audio is decoded and transcribed entirely inside the container via a bundled `whisper.cpp`; nothing is sent to OpenAI, Anthropic, or any other external service. Independent of `BACKEND` — available regardless of which CLI (Codex or Claude) is active. Every route below additionally requires the license to be on a plan that includes Whisper (see the table above); a plan without it gets `403 { error: "whisper_not_entitled" }` on all of them.
 
 ### `POST /v1/audio/transcriptions`
 
