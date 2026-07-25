@@ -16,9 +16,9 @@ Audio sent to `POST /v1/audio/transcriptions` is transcribed entirely inside the
 
 | Tag                      | CLI backends   | Notes                                          |
 | ------------------------ | -------------- | ----------------------------------------------- |
-| `latest`, `2.0.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
-| `claude`, `2.0.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
-| `codex`, `2.0.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
+| `latest`, `2.1.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
+| `claude`, `2.1.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
+| `codex`, `2.1.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
 
 As of `2.0.0`, every tag also bundles `whisper.cpp` and a baked-in Whisper model (`base` by default). The `claude` variant measures ~340MB; `codex` and the combined `latest`/`full` image are in a similar range, a bit larger for `full` since it installs both CLIs. Whisper adds roughly the size of the baked-in model on top of that (~150MB for `base`) — see [Audio transcription](#7-audio-transcription-optional-plan-gated) below to change the baked-in model size, or swap models at runtime without rebuilding.
 
@@ -69,7 +69,7 @@ Values defined under `environment:` take precedence over values from `env_file`,
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.0.0-codex
+    image: thebuildguild/cli-bridge:2.1.0-codex
     ports:
       - "3900:3900"
     env_file:
@@ -92,7 +92,7 @@ volumes:
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.0.0-claude
+    image: thebuildguild/cli-bridge:2.1.0-claude
     ports:
       - "3900:3900"
     env_file:
@@ -117,7 +117,7 @@ Both CLIs are installed, but only one backend is active at a time.
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.0.0
+    image: thebuildguild/cli-bridge:2.1.0
     ports:
       - "3900:3900"
     env_file:
@@ -282,7 +282,57 @@ curl http://localhost:3900/v1/audio/status \
   -H "Authorization: Bearer $BRIDGE_TOKEN"
 ```
 
-**Switching the Whisper model without rebuilding:** download a different `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp, mount it into the container (e.g. onto the `cli_data` volume), and set `WHISPER_MODEL_PATH` to the mounted path. To change which model ships **baked into the image by default**, rebuild with `--build-arg WHISPER_MODEL=small` (or `tiny`/`medium`/`large-v3`) — bigger models are more accurate but need more RAM/CPU per request, so pick to match your host.
+If a transcription hangs or is taking too long, cancel it and free the capacity slot immediately instead of waiting out the timeout:
+
+```bash
+curl -X POST http://localhost:3900/v1/audio/cancel \
+  -H "Authorization: Bearer $BRIDGE_TOKEN"
+```
+
+#### Switching models (no rebuild needed)
+
+As of `2.1.0`, models can be downloaded and switched entirely from the dashboard or API — no rebuild, no manual file handling:
+
+```bash
+# List the catalog (tiny/base/small/medium/large-v3-turbo/large-v3) with size and downloaded/active state
+curl http://localhost:3900/v1/audio/models \
+  -H "Authorization: Bearer $BRIDGE_TOKEN"
+
+# Switch — downloads to the persistent /data volume automatically if not already present,
+# then activates once done. Returns immediately; poll GET /v1/audio/models for progress.
+curl -X POST http://localhost:3900/v1/audio/models/large-v3-turbo/select \
+  -H "Authorization: Bearer $BRIDGE_TOKEN"
+
+# Cancel an in-progress download, or delete a downloaded model to free disk space
+curl -X POST http://localhost:3900/v1/audio/models/cancel -H "Authorization: Bearer $BRIDGE_TOKEN"
+curl -X DELETE http://localhost:3900/v1/audio/models/tiny -H "Authorization: Bearer $BRIDGE_TOKEN"
+```
+
+Downloaded models and the active selection live on the `/data` volume, so they survive container recreation and image updates. The dashboard's Whisper card exposes all of this as a dropdown with a live download progress bar and a confirmation prompt before deleting.
+
+To change which model ships **baked into the image by default** (rather than downloaded afterward), rebuild with `--build-arg WHISPER_MODEL=small` (or `tiny`/`medium`/`large-v3`/`large-v3-turbo`) — bigger models are more accurate but need more RAM/CPU per request, so pick to match your host.
+
+#### Per-request model override
+
+Pass `model` on a transcription request to use a different *already-downloaded* model for just that one request, without changing the dashboard's default:
+
+```bash
+curl http://localhost:3900/v1/audio/transcriptions \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  -F "file=@voice-note.ogg" \
+  -F "model=large-v3-turbo"
+```
+
+An undownloaded or unknown model name returns a clear `400` rather than silently falling back or triggering a multi-minute download mid-request. Omitting `model` (or sending OpenAI's fixed `"whisper-1"` placeholder) uses whichever model is currently active.
+
+#### Diagnosing failures
+
+`GET /v1/logs` (and the dashboard's Logs tab) shows recent transcription/download failures with the actual error message — e.g. the exact `whisper-cli timed out after ...` text — instead of just a bare failure count:
+
+```bash
+curl http://localhost:3900/v1/logs \
+  -H "Authorization: Bearer $BRIDGE_TOKEN"
+```
 
 ## Configuration
 
@@ -559,6 +609,20 @@ WHISPER_MAX_CONCURRENT=1
 
 Requests beyond this limit receive `429 Too Many Requests`. Keep this low on small or shared hosts — a transcription job is CPU/RAM-heavy, and this also protects concurrent chat requests running on the same box from resource starvation.
 
+An in-progress job can also be cancelled outright with `POST /v1/audio/cancel`, freeing its slot immediately instead of waiting out the timeout below.
+
+#### `WHISPER_TRANSCRIBE_TIMEOUT_MS`
+
+Timeout for the actual whisper-cli inference step, separate from `WHISPER_TIMEOUT_MS` (which only covers the fast ffmpeg decode step).
+
+Default (10 minutes):
+
+```dotenv
+WHISPER_TRANSCRIBE_TIMEOUT_MS=600000
+```
+
+Transcription time scales with both audio length and model size — a larger/more-accurate model transcribing 1-2 minutes of audio can take several minutes on modest CPU hardware. Raise this further if you still see `whisper-cli timed out` errors with a large model on slow hardware.
+
 #### `MAX_AUDIO_BYTES`
 
 Maximum upload size for `POST /v1/audio/transcriptions`, in bytes.
@@ -667,18 +731,23 @@ The following route does not require a bridge token:
 GET /
 ```
 
-All endpoints except `/v1/license/*` also require an activated CLIBridge license. `POST /v1/audio/transcriptions` and `GET /v1/audio/status` additionally require a plan that includes Whisper — see [Plan entitlement](#plan-entitlement) above.
+All endpoints except `/v1/license/*` also require an activated CLIBridge license. Every `/v1/audio/*` endpoint additionally requires a plan that includes Whisper — see [Plan entitlement](#plan-entitlement) above.
 
 ### OpenAI-compatible endpoints
 
-| Method | Path                           | Description                                                |
-| ------ | ------------------------------ | ------------------------------------------------------------ |
-| `GET`  | `/v1/models`                   | List available models                                        |
-| `POST` | `/v1/models/refresh`           | Probe the active CLI and refresh the model cache             |
-| `POST` | `/v1/chat/completions`         | Create a chat completion using JSON or SSE streaming         |
-| `POST` | `/v1/chat/completions/upload`  | Create a chat completion with one multipart image upload     |
-| `POST` | `/v1/audio/transcriptions`     | Transcribe audio — 100% local whisper.cpp, plan-gated        |
-| `GET`  | `/v1/audio/status`             | Whisper backend health, capacity, and usage metrics          |
+| Method   | Path                            | Description                                                |
+| -------- | -------------------------------- | ------------------------------------------------------------ |
+| `GET`    | `/v1/models`                    | List available models                                        |
+| `POST`   | `/v1/models/refresh`            | Probe the active CLI and refresh the model cache             |
+| `POST`   | `/v1/chat/completions`          | Create a chat completion using JSON or SSE streaming         |
+| `POST`   | `/v1/chat/completions/upload`   | Create a chat completion with one multipart image upload     |
+| `POST`   | `/v1/audio/transcriptions`      | Transcribe audio — 100% local whisper.cpp, plan-gated        |
+| `POST`   | `/v1/audio/cancel`              | Cancel in-progress transcription(s), freeing capacity immediately |
+| `GET`    | `/v1/audio/status`              | Whisper backend health, capacity, and usage metrics          |
+| `GET`    | `/v1/audio/models`              | Whisper model catalog — downloaded/active state, live download progress |
+| `POST`   | `/v1/audio/models/:name/select` | Switch model, downloading it first if needed                 |
+| `POST`   | `/v1/audio/models/cancel`       | Cancel an in-progress model download                          |
+| `DELETE` | `/v1/audio/models/:name`        | Delete a downloaded model to free disk space                  |
 
 ### CLI authentication endpoints
 
@@ -712,6 +781,7 @@ All endpoints except `/v1/license/*` also require an activated CLIBridge license
 | `GET`  | `/v1/health?details=true` | Expanded CLI, whisper, watchdog, and license health status |
 | `GET`  | `/v1/metrics`             | Live request and token counters                        |
 | `GET`  | `/v1/watchdog/status`     | Watchdog configuration and unhealthy-check count       |
+| `GET`  | `/v1/logs`                | Recent operational log entries (transcription/download failures, timeouts) — resets on restart |
 | `GET`  | `/v1/insights/latest`     | Get the latest generated insight report                |
 | `GET`  | `/v1/insights/history`    | Get previous generated insight reports                 |
 | `POST` | `/v1/insights/generate`   | Generate an insight report outside the normal schedule |
@@ -740,7 +810,7 @@ GET /
 * Authentication and activation state are stored in the Docker volume mounted at `/data`.
 * Keep the `cli_data` volume persistent between container restarts and upgrades.
 * Do not run `docker compose down -v` unless you intentionally want to erase the activation and CLI authentication state.
-* Use image version `2.0.0` or newer.
+* Use image version `2.1.0` or newer.
 * Use a versioned Docker image tag in production instead of relying on `latest`.
 * The combined image contains both CLIs but only one backend can process requests at a time. Whisper audio transcription is available regardless of which backend is selected.
 * Protect `BRIDGE_TOKEN` as you would protect an API key.
