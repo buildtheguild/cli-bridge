@@ -16,9 +16,9 @@ Audio sent to `POST /v1/audio/transcriptions` is transcribed entirely inside the
 
 | Tag                      | CLI backends   | Notes                                          |
 | ------------------------ | -------------- | ----------------------------------------------- |
-| `latest`, `2.1.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
-| `claude`, `2.1.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
-| `codex`, `2.1.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
+| `latest`, `2.1.1`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
+| `claude`, `2.1.1-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
+| `codex`, `2.1.1-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
 
 As of `2.0.0`, every tag also bundles `whisper.cpp` and a baked-in Whisper model (`base` by default). The `claude` variant measures ~340MB; `codex` and the combined `latest`/`full` image are in a similar range, a bit larger for `full` since it installs both CLIs. Whisper adds roughly the size of the baked-in model on top of that (~150MB for `base`) — see [Audio transcription](#7-audio-transcription-optional-plan-gated) below to change the baked-in model size, or swap models at runtime without rebuilding.
 
@@ -69,7 +69,7 @@ Values defined under `environment:` take precedence over values from `env_file`,
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.0-codex
+    image: thebuildguild/cli-bridge:2.1.1-codex
     ports:
       - "3900:3900"
     env_file:
@@ -92,7 +92,7 @@ volumes:
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.0-claude
+    image: thebuildguild/cli-bridge:2.1.1-claude
     ports:
       - "3900:3900"
     env_file:
@@ -117,7 +117,7 @@ Both CLIs are installed, but only one backend is active at a time.
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.0
+    image: thebuildguild/cli-bridge:2.1.1
     ports:
       - "3900:3900"
     env_file:
@@ -810,7 +810,7 @@ GET /
 * Authentication and activation state are stored in the Docker volume mounted at `/data`.
 * Keep the `cli_data` volume persistent between container restarts and upgrades.
 * Do not run `docker compose down -v` unless you intentionally want to erase the activation and CLI authentication state.
-* Use image version `2.1.0` or newer.
+* Use image version `2.1.1` or newer.
 * Use a versioned Docker image tag in production instead of relying on `latest`.
 * The combined image contains both CLIs but only one backend can process requests at a time. Whisper audio transcription is available regardless of which backend is selected.
 * Protect `BRIDGE_TOKEN` as you would protect an API key.
