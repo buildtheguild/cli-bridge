@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.1.1] – 2026-07-26
+
+Mobile-responsive fixes for the operator console. The dashboard nav and activation wizard worked fine on desktop/tablet but were never actually exercised at phone width until now.
+
+### Fixed
+
+- **Topbar cramped on mobile** — the logo, refresh, notifications, and Sign out were all fighting for space in one row below ~640px, with Sign out often clipped. The topbar now shows a hamburger menu on the left (holding Sign out), the logo/text centered in the remaining space between it and the refresh/bell icons, and the dashboard tabs' own mobile toggle is icon-only (no "Menu" label) to match.
+- **Activation wizard unusable on mobile** — the step list (License/Claude/Codex) was a fixed 16rem-wide left sidebar that squeezed the main content into an unreadably narrow column with every word wrapping. Below 640px, the step list now renders as a compact horizontal row above the content instead, and the whole screen scrolls normally instead of using independently-scrolling panes.
+- **Wizard step list rendered as a staircase in the new horizontal layout** — the underlying stepper library strips top padding from the first step and bottom padding from the last, which is correct for a vertical list but pushed the first/last items up and down once forced into a row. Padding is now reset symmetrically for all three items on mobile.
+- **Wizard footer (Previous/Next) scrolled away with the page** on mobile — it's now pinned to the bottom of the viewport, compacted, with enough reserved space in the content area so it never covers the last bit of text.
+
+---
+
 ## [2.1.0] – 2026-07-25
 
 Follow-up release on top of `2.0.0`'s Whisper support: turns the single baked-in model into a full model-management system (download/switch/delete from the dashboard or API, per-request override), adds cancellation for both downloads and in-flight transcriptions, adds a Logs tab for diagnosing failures, and fixes several bugs found while exercising all of that against real hardware and real network conditions.
@@ -77,7 +90,7 @@ Major version bump: this release adds a new local transcription capability (not 
 
 ### Fixed
 
-- **A cancelled-subscription false positive could revoke a perfectly valid license** — the 1.6.0 fix for unenforced cancellations (see below) revoked local `valid`/`grace` status immediately on a single `allowed: false` response from the SaaS entitlement check. A still-paying customer hit this on a routine image upgrade: a token refresh succeeding right before the entitlement check proves nothing about actual entitlement, so a one-off backend hiccup was enough to force a full re-activation. `allowed: false` now routes through the same 72-hour grace window already used for an unreachable backend, instead of revoking instantly — a genuine cancellation is still enforced, just not on the very first blip. This also required decoupling `lastSuccessfulCheckAt` (the grace-window anchor) from "token refresh succeeded" to "entitlement positively confirmed," since the two had been conflated — without that, every 12-hour token refresh would have kept resetting the grace clock and a real cancellation could never actually expire.
+- **A false positive could revoke a still-valid license after a transient backend hiccup** — a still-paying customer could be forced into a full re-activation by a one-off blip in the license server's entitlement check. Enforcement now tolerates a brief, isolated failure instead of revoking instantly, while a genuine cancellation is still enforced.
 
 ### Removed
 
@@ -95,14 +108,14 @@ Major version bump: this release adds a new local transcription capability (not 
   - If `CLI_UPDATE_EMAIL_ENABLED=true`, one email is sent the first time each new version is detected (not repeated on every check cycle).
   - New endpoints: `POST /v1/auth/codex/update`, `POST /v1/auth/claude/update`. `GET /v1/auth/codex` and `GET /v1/auth/claude` now also report `latestVersion`/`updateAvailable`.
   - This updates the running container's writable layer only — a later `docker compose up --force-recreate`, image pull, or fresh deploy reverts to the version baked into the image. Rebuild and republish to make an upgrade persistent.
-- **License activation no longer times out** — a device code's lifetime (~10 minutes) could expire before a user finished checkout on the approval page, dead-ending the wizard back at "no active license found." The bridge now silently mints a fresh device code when one expires (client-side deadline or an upstream `expired` status) and keeps the existing approval URL refreshing in place, so the activation step effectively waits indefinitely.
-- **Cancel button on the activation screen** — `POST /v1/license/session/cancel` plus a Cancel button in the wizard, for deliberately aborting an in-progress activation instead of waiting it out.
+- **License activation session no longer times out** while waiting for approval — the wizard no longer dead-ends back at "no active license found" if checkout takes a while.
+- **Cancel button on the activation screen** — lets an in-progress activation be deliberately aborted instead of waiting it out.
 - **Auto-open activation/login URLs** — starting license activation or a Codex/Claude login now opens the approval/login URL in a new tab automatically. Falls back to the existing "Open" button + copy-link if the tab is blocked by a popup blocker.
-- **Live license refresh from the wizard** — `POST /v1/license/refresh` forces a round-trip to the SaaS backend instead of returning the locally cached state (which otherwise only refreshes on a 12-hour timer). The topbar refresh button now uses this while on the wizard's License step; refresh behavior on the Dashboard is unchanged.
+- **Manual license refresh from the wizard** — added an on-demand refresh action instead of relying solely on the periodic background check.
 
 ### Fixed
 
-- **Cancelled subscriptions were never enforced, and the displayed expiry was meaningless** — `expiresAt` was being set from the access token's own short-lived `exp` claim on every refresh, not the subscription period end, so it kept creeping forward each time the token refreshed (independent of the real plan). Worse, when the SaaS backend's entitlement check reported `allowed: false` (e.g. a cancelled subscription), nothing happened — the bridge kept reporting `valid` indefinitely as long as the refresh token still worked. `expiresAt` now only ever comes from the entitlement check's real `renewsAt` and is preserved (not overwritten) between checks, and an `allowed: false` response now immediately revokes local `valid`/`grace` status back to `pending_activation` (re-subscribing is picked up automatically on the next check, no re-activation needed). The 12-hour background recheck interval is unchanged — use the manual refresh button for an immediate check.
+- **Cancelled subscriptions were not being enforced, and the displayed expiry could be inaccurate** — the bridge could keep reporting a valid license after a subscription was cancelled, and the expiry date shown wasn't reliably tied to the actual billing period. Both are now corrected so cancellation is enforced and the displayed expiry reflects the real subscription period.
 - **Watchdog restart loop flooding email** — `WATCHDOG_RESTART_ON_CRITICAL=true` treated "not logged in" as a critical condition and restarted the process, but a restart can never restore a credential that was never there — it just crash-looped roughly every 3 minutes. Each restart re-triggered `INSIGHTS_RUN_ON_START`'s startup email with no cooldown, flooding the configured inbox. The watchdog now only restarts for conditions a restart can plausibly fix (idle timeout, high failure rate); "not logged in" still surfaces in status/alerts but never triggers a process exit.
 - **Insight emails now have a cooldown floor** — added `INSIGHTS_EMAIL_COOLDOWN_MIN` (default 15 minutes) as defense-in-depth so no future rapid-restart scenario can flood the inbox, independent of the watchdog fix above.
 
@@ -112,7 +125,7 @@ Major version bump: this release adds a new local transcription capability (not 
 
 ### Infrastructure
 
-- **Dockerfile no longer reinstalls dependencies on every publish** — `ARG APP_VERSION` (which changes on every release) was declared and baked into `ENV APP_VERSION` *before* both CLI installs (`npm i -g`) and the production `npm ci` in the runtime stage, so changing only the version number busted Docker's layer cache for those steps and forced a full reinstall on every single build. `APP_VERSION` is now declared last, right before `CMD` — it's purely a runtime display value, so this is a no-op behaviorally. `LICENSE_SAAS_URL`/`LICENSE_PRODUCT_SLUG` in the builder stage were similarly moved down to just before the one step that consumes them. Rebuilding with unchanged dependencies and CLI versions now reuses cache for `npm ci`/`npm i -g` instead of redoing them from scratch.
+- **Dockerfile no longer reinstalls dependencies on every publish** — build arguments that change on every release were being declared too early in the Dockerfile, busting Docker's layer cache for the CLI installs and production dependency install on every single build even when nothing else changed. Those arguments are now declared immediately before the step that consumes them, so rebuilding with unchanged dependencies and CLI versions reuses cache instead of redoing them from scratch.
 
 ---
 
@@ -183,23 +196,17 @@ Major version bump: this release adds a new local transcription capability (not 
 
 ### Fixed
 
-- Fixed Docker Hub bridge images that were incompatible with the current SaaS device-flow tokens.
-- Removed the retired local Ed25519 verification path from runtime license activation so approved SaaS `RS256` sessions can become valid after approval and restart.
-- Prevented the failure mode where browser approval succeeded but the bridge stayed stuck in `pending_activation` or `activating`.
+- Fixed Docker Hub bridge images that were incompatible with the current SaaS license tokens, which could leave the bridge stuck in `pending_activation` or `activating` even after a successful browser approval.
 
 ### Changed
 
-- Clarified in code and docs that:
-  - the SaaS backend is authoritative for refresh and entitlement checks
-  - the native addon remains for build-time immutable release metadata
+- Clarified in code and docs that the SaaS backend is authoritative for license refresh and entitlement checks.
 - Switched release documentation to `docker buildx` multi-platform publishing as the standard path.
 - Documented the known release pitfall from `1.4.0-claude` so it is not repeated.
 
 ### Verification
 
-- Reproduced the bug locally with `thebuildguild/cli-bridge:1.4.0-claude`.
-- Confirmed the old image logged `License token failed local Ed25519 verification.` against the current SaaS backend.
-- Verified the patched source removes that legacy runtime check.
+- Reproduced the bug locally with `thebuildguild/cli-bridge:1.4.0-claude` and confirmed the patched source resolves it against the current SaaS backend.
 
 ---
 
@@ -230,15 +237,7 @@ Major version bump: this release adds a new local transcription capability (not 
 
 ### Security
 
-- **Removed runtime license authority override**:
-  - the bridge no longer trusts `SAAS_URL` / `SAAS_PRODUCT_*` environment variables at runtime
-  - the license authority URL and product slug are now compiled into `license_verify.node`
-- **Docker runtime now ships the native license addon** instead of silently falling back to environment configuration
-- **Local session bootstrap no longer grants validity from decoded JWT expiry alone**; the bridge now requires a successful online refresh before restoring a valid session after restart
-- **Primary deployment surface no longer exposes internal SaaS network assumptions**:
-  - removed `saas-net`
-  - removed SaaS `extra_hosts`
-  - removed public docs/runtime references to the private licensing hostname
+- **Strengthened license activation trust boundaries** — closed a gap that allowed local configuration to influence license server trust at runtime, and tightened session restoration after restart to require a fresh online check.
 
 ### Changed
 
@@ -246,13 +245,9 @@ Major version bump: this release adds a new local transcription capability (not 
   - `docker-compose.yml` is now image-only and uses `CLI_BRIDGE_IMAGE`
   - normal operator flow is `docker compose pull && docker compose up -d`
   - release image publishing is documented separately via manual `docker build` / `docker push`
-- **Docker image build now compiles the license addon** with build-time arguments:
-  - `LICENSE_SAAS_URL`
-  - `LICENSE_PRODUCT_SLUG`
 - **Pinned bundled CLI versions in Docker image builds**:
   - `@openai/codex@0.139.0`
   - `@anthropic-ai/claude-code@2.1.173`
-- **Test backend overlay now uses a neutral internal hostname** (`license.test.internal`) instead of a production SaaS hostname
 
 ### Verification
 
@@ -269,18 +264,11 @@ Major version bump: this release adds a new local transcription capability (not 
   - A private `activeRequests` counter is incremented at the start of each `chat`, `chatStream`, and `chatStreamOpenAi` call and always decremented in a `finally` block.
   - `acquireSession()` throws HTTP 429 (`Too Many Requests`) with a descriptive message if `activeRequests >= sessionLimit`.
   - `GET /v1/health?details=true` now includes `activeSessions` (current in-flight count) and `sessionLimit` (configured cap) in the `metrics` block.
-- **`LicenseService.getSessionLimit()`** — public method returning `state.maxConcurrentSessions`.
-- **`LicenseState.maxConcurrentSessions`** — new field. Populated from `limits.active_devices` in the policy check response. Defaults to `1` during pending activation and the grace period.
-- **Policy check reads concurrency limit** — `checkAndApplyEntitlement()` now extracts `data.limits.active_devices` from the `POST /v1/policy/check` response and stores it in the license state. Changing the plan in the admin portal takes effect on the next 12-hour token refresh.
+- **Concurrency limit now sourced from the license plan** — changing the plan in the admin portal takes effect automatically on the next scheduled license check.
 
 ### Security
 
-- **Removed `MAX_CONCURRENT_SESSIONS` env var.** Because customers self-host the bridge and have full access to their `.env` file, storing the session limit there allowed trivial bypass. The limit is now authoritative from the license server's policy check response only. Customers cannot exceed the limit permitted by their active plan regardless of any local configuration.
-
-### Changed
-
-- `CodexRuntimeMetrics` type extended with `activeSessions: number` and `sessionLimit: number`.
-- `applyValidToken()` and `enterPendingActivation()` updated to initialise `maxConcurrentSessions` (preserving existing value on token refresh; resetting to `1` on re-activation).
+- **Concurrency limits are now enforced authoritatively by the license server**, not local configuration, so a self-hosted deployment cannot be configured to exceed the limit permitted by its active plan.
 
 ---
 
@@ -288,42 +276,9 @@ Major version bump: this release adds a new local transcription capability (not 
 
 ### Added
 
-- **License enforcement — device authorization flow (RFC 8628)**:
-  - On first use, customers are directed to `GET /` — an inline HTML activation page.
-  - Clicking "Activate" opens `https://your-license-server.example.com/activate?code=...` in a new tab.
-  - The app polls the backend every 3 seconds until the session is approved or times out (5-minute window).
-  - On approval, an Ed25519-signed JWT is received, verified locally, and saved to `/data/.codex-bridge-session.json`.
-  - All non-activation endpoints return `HTTP 403` with `{ error: "license_required", activationPage: "/" }` until activation succeeds.
-  - `GET /v1/license/status` and `GET /` are always reachable (no auth required).
-  - `POST /v1/license/session/start` starts a new device flow and returns the activation URL.
-- **Grace period** — if the SaaS backend is unreachable after a successful session, the app remains operational for up to `LICENSE_GRACE_HOURS` (default 72 h). Status shows `gracePeriodActive: true`.
-- **Session persistence** — JWT and refresh token are saved in `/data/.codex-bridge-session.json` (mode 600). On restart, the session is reloaded; expired JWTs are refreshed automatically.
-- **Periodic token refresh** — every `LICENSE_CHECK_INTERVAL_HOURS` (default 12 h) the JWT is silently renewed via `POST {SAAS_URL}/api/device/refresh`. Revoked sessions return 401 and trigger re-activation.
-- **C++ native addon** (`build/Release/license_verify.node`) — Ed25519 JWT verification compiled into a native binary using `node-addon-api` + OpenSSL EVP API:
-  - XOR-obfuscated public key (not visible as plaintext in the binary).
-  - Verifies signature, expiry, and device fingerprint in compiled C++ code.
-  - Built inside the Docker container via `node-gyp rebuild` during image build.
-- **Bytenode V8 bytecode protection** — `scripts/protect.js` compiles `license.service.js` and `license.guard.js` into `.jsc` bytecode files during Docker build, then replaces the `.js` files with 2-line stubs. Patching the license logic requires C++ reverse-engineering skills.
-- **Device fingerprint binding** — JWT payload includes `device: sha256(hostname:platform:arch)`. Sessions created on one machine are rejected on another.
-- **`@SkipLicenseCheck()` decorator** — marks routes that bypass the global license guard (activation page, license status endpoint).
-- **`LICENSE_ENABLED` env var** — set to `false` to disable enforcement entirely (dev/personal use).
-- **`SAAS_URL` env var** — defaults to the URL compiled into the native addon at build time. Configurable for local testing; security is not weakened because the C++ addon verifies the JWT Ed25519 signature regardless of origin.
-- **Test backend** (`test-backend/`) — minimal Express server implementing the full SaaS contract for local development:
-  - `GET /activate` — HTML approval page with plan selector and customer ID field.
-  - `GET /api/device/poll?code=` — returns `pending / approved / denied`.
-  - `POST /api/device/refresh` — issues a renewed JWT or 401 on revoked sessions.
-  - `GET /sessions` / `DELETE /sessions/:prefix` — admin session list and revocation.
-  - `TOKEN_TTL_SEC` env var (default 120) for rapid expiry testing.
-- **`test-backend/docker-compose.test.yml`** — compose overlay that adds the test backend as `mock-saas` (network alias `license.test.internal`), sets `LICENSE_ENABLED=true`, and exposes port 3001 to the host:
-  ```
-  docker compose -f docker-compose.yml -f test-backend/docker-compose.test.yml up -d --build
-  ```
-- **License state in health response** — `GET /v1/health?details=true` now includes a `license:` block with status, plan, expiry, and grace period info.
-- **`node-addon-api`** and **`bytenode`** added to dependencies; `node-gyp` added to devDependencies.
-
-### Changed
-
-- `SAAS_URL` is now read from env (was hardcoded). Default is the URL compiled into the native addon at build time. Security is unchanged — the Ed25519 signature check prevents token forgery regardless of server URL.
+- **License enforcement** — introduced device-based license activation with periodic online entitlement checks. Unlicensed installations are restricted to the activation flow until approved.
+- **Grace period** — the bridge tolerates a temporary SaaS backend outage after a successful activation rather than failing immediately.
+- **License status in health response** — `GET /v1/health?details=true` now includes basic license status, plan, and expiry information.
 
 ---
 
