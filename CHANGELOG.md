@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.2.0] – 2026-07-29
+
+Operator-console safety and diagnostics pass: destructive actions now confirm before running, CLI authentication is easier to complete, and the Requests/Failure Rate metrics no longer get permanently skewed by the bridge's own internal housekeeping calls.
+
+### Added
+
+- **Confirmation modals for destructive dashboard actions** — updating a provider's CLI and revoking a provider's authentication both previously ran immediately on click. Both now show a confirmation dialog first: the CLI update modal explains that a newer version can occasionally behave differently with the bridge and that restarting with `--force-recreate` (or pulling a fresh image) restores the version baked into the image; the revoke-auth modal explains that stored credentials and any in-progress session will be cleared and sign-in will be needed again. Applies everywhere either action can be triggered (wizard and dashboard alike).
+- **Copy button for the Codex device code** — the Codex CLI authentication step shows the CLI's raw terminal output, which includes a one-time device code the operator has to manually type into `https://auth.openai.com/codex/device`. That code was plain text inside a scrolling console block with no easy way to select it cleanly. A **Copy code** button now extracts it directly and copies it to the clipboard, next to the existing Reset action.
+- **`GET /v1/logs` now also covers Codex/Claude chat and streaming request failures**, not just Whisper transcription/download failures. Previously a failed chat request only showed up as a bare percentage in the Failure Rate metric with no way to see why from the dashboard — the operator had to go find it in `docker logs` instead. Every failure counted in Requests/Failure Rate now has a matching, readable entry here (e.g. `{ context: "Codex", message: "Chat request failed: not logged in" }`).
+
+### Fixed
+
+- **A stale, already-resolved failure could permanently show "100% failure rate" on the dashboard** — the periodic insights report (`INSIGHTS_RUN_ON_START`, on by default) makes a real chat call to the configured backend on every startup and on its own schedule. If that call failed — most commonly because the CLI wasn't authenticated yet — it was counted in the same `totalRequests`/`failedRequests` counters as genuine API traffic, with no way for the number to recover afterward short of restarting the container, even once the operator fixed the underlying issue and everything was working fine. The insights report's own chat call is now excluded from the Requests/Failure Rate/Tokens metrics entirely, since it's internal housekeeping rather than user traffic — its failures still land in `GET /v1/logs` for diagnosis, just not in the traffic counters.
+- **Whisper's model picker offered "Switch"/download controls that couldn't fix an unavailable transcription backend** — the Whisper card gated the model-switching UI on the flattened `available` status, which is `false` both when just the model file is missing (fixable by downloading/switching) and when `whisper-cli` or `ffmpeg` themselves are missing entirely (not fixable by picking a different model — most commonly hit when running outside the Docker image, which is what bundles both). The picker now reads the status endpoint's more granular `binaryOk`/`ffmpeg.ok` fields: if either is missing, it's replaced with a plain explanation of what's actually missing and that switching models won't help, instead of offering controls that would just fail.
+- **Copy code and Reset buttons on the device-auth screen were two separate, misaligned single-button rows** — each was right-aligned but isolated from the other with dead whitespace to its left, reading as bolted-on next to the left-aligned Open-in-browser/Copy-link row above them. They're now one right-aligned row together.
+- Fixed the modal Escape-key handler never closing the CLI update confirmation modal (missed when that modal was first added).
+
+---
+
 ## [2.1.1] – 2026-07-26
 
 Mobile-responsive fixes for the operator console. The dashboard nav and activation wizard worked fine on desktop/tablet but were never actually exercised at phone width until now.
