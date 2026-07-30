@@ -16,9 +16,9 @@ Audio sent to `POST /v1/audio/transcriptions` is transcribed entirely inside the
 
 | Tag                      | CLI backends   | Notes                                          |
 | ------------------------ | -------------- | ----------------------------------------------- |
-| `latest`, `2.1.1`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
-| `claude`, `2.1.1-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
-| `codex`, `2.1.1-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
+| `latest`, `2.2.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
+| `claude`, `2.2.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
+| `codex`, `2.2.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
 
 As of `2.0.0`, every tag also bundles `whisper.cpp` and a baked-in Whisper model (`base` by default). The `claude` variant measures ~340MB; `codex` and the combined `latest`/`full` image are in a similar range, a bit larger for `full` since it installs both CLIs. Whisper adds roughly the size of the baked-in model on top of that (~150MB for `base`) — see [Audio transcription](#7-audio-transcription-optional-plan-gated) below to change the baked-in model size, or swap models at runtime without rebuilding.
 
@@ -69,7 +69,7 @@ Values defined under `environment:` take precedence over values from `env_file`,
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.1-codex
+    image: thebuildguild/cli-bridge:2.2.0-codex
     ports:
       - "3900:3900"
     env_file:
@@ -92,7 +92,7 @@ volumes:
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.1-claude
+    image: thebuildguild/cli-bridge:2.2.0-claude
     ports:
       - "3900:3900"
     env_file:
@@ -117,7 +117,7 @@ Both CLIs are installed, but only one backend is active at a time.
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.1.1
+    image: thebuildguild/cli-bridge:2.2.0
     ports:
       - "3900:3900"
     env_file:
@@ -327,7 +327,7 @@ An undownloaded or unknown model name returns a clear `400` rather than silently
 
 #### Diagnosing failures
 
-`GET /v1/logs` (and the dashboard's Logs tab) shows recent transcription/download failures with the actual error message — e.g. the exact `whisper-cli timed out after ...` text — instead of just a bare failure count:
+`GET /v1/logs` (and the dashboard's Logs tab) shows recent transcription/download failures with the actual error message — e.g. the exact `whisper-cli timed out after ...` text — instead of just a bare failure count. It also covers Codex/Claude chat and streaming request failures, so a failed request shown in the Requests/Failure Rate metrics always has a matching explanation here. The periodic insights report (see `INSIGHTS_*` below) is excluded from those metrics — it's internal housekeeping, not user traffic — but its failures still land in `GET /v1/logs`, so a stale "not logged in" blip from before you authenticated won't leave a permanent-looking 100% failure rate on the dashboard:
 
 ```bash
 curl http://localhost:3900/v1/logs \
@@ -781,7 +781,7 @@ All endpoints except `/v1/license/*` also require an activated CLIBridge license
 | `GET`  | `/v1/health?details=true` | Expanded CLI, whisper, watchdog, and license health status |
 | `GET`  | `/v1/metrics`             | Live request and token counters                        |
 | `GET`  | `/v1/watchdog/status`     | Watchdog configuration and unhealthy-check count       |
-| `GET`  | `/v1/logs`                | Recent operational log entries (transcription/download failures, timeouts) — resets on restart |
+| `GET`  | `/v1/logs`                | Recent operational log entries (chat/streaming request failures, transcription/download failures, timeouts) — resets on restart |
 | `GET`  | `/v1/insights/latest`     | Get the latest generated insight report                |
 | `GET`  | `/v1/insights/history`    | Get previous generated insight reports                 |
 | `POST` | `/v1/insights/generate`   | Generate an insight report outside the normal schedule |
@@ -810,7 +810,7 @@ GET /
 * Authentication and activation state are stored in the Docker volume mounted at `/data`.
 * Keep the `cli_data` volume persistent between container restarts and upgrades.
 * Do not run `docker compose down -v` unless you intentionally want to erase the activation and CLI authentication state.
-* Use image version `2.1.1` or newer.
+* Use image version `2.2.0` or newer.
 * Use a versioned Docker image tag in production instead of relying on `latest`.
 * The combined image contains both CLIs but only one backend can process requests at a time. Whisper audio transcription is available regardless of which backend is selected.
 * Protect `BRIDGE_TOKEN` as you would protect an API key.
