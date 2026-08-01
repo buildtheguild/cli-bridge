@@ -88,8 +88,8 @@ All CLI-auth and CLI-update routes are additionally rate-limited per source IP.
 
 - `GET /v1/health` — basic `{ ok, time }`; `?details=true` (requires `HEALTH_VERBOSE_ENABLED=true`) adds version, memory, `cli`, `whisper`, `watchdog`, `license`. `cli.quotaLeft` is always `null` — neither CLI exposes machine-readable remaining quota.
 - `GET /v1/watchdog/status` — watchdog config + consecutive unhealthy check count
-- `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`. Lightweight — no AI calls.
-- `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Currently populated by the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries) — not a general application log. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only — no Whisper plan entitlement required, since it's not itself a Whisper feature.
+- `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`. Lightweight — no AI calls. Reflects real `/v1/chat/completions`-family traffic only; the periodic insights report's own chat call (see `docs/config.md`) is excluded so its success/failure never shows up here — check `GET /v1/logs` for that instead.
+- `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Populated by Codex/Claude chat and streaming request failures (`context: "Codex"`/`"Claude"`) and the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries, `context: "Whisper"`) — not a full application log, just these operator-relevant failure points. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only — no Whisper plan entitlement required, since it's not itself a Whisper feature.
 - `GET /v1/insights/latest` — most recent insight report, or `null`
 - `GET /v1/insights/history?limit=10` — last N reports, newest first
 - `POST /v1/insights/generate` — triggers an out-of-schedule insight report, returns it
@@ -146,11 +146,42 @@ Streaming returns OpenAI-style SSE chunks (`chat.completion.chunk`) and ends wit
 
 Non-streaming errors and stream-setup errors both return the OpenAI error shape: `{ error: { message, type, param: null, code: null } }`.
 
+When a request sends an unknown `model` and fallback is enabled, successful responses include a top-level `model_fallback` object:
+
+```json
+{
+  "model_fallback": {
+    "requested": "claude-sonnet-4-6",
+    "used": "gpt-5.5",
+    "reason": "unknown_model",
+    "message": "Requested model 'claude-sonnet-4-6' is not available for the active backend, so the server default model was used instead."
+  }
+}
+```
+
+When a known emergency condition forces an internal OpenRouter failover, successful responses include a top-level `provider_fallback` object:
+
+```json
+{
+  "provider_fallback": {
+    "from": "claude",
+    "to": "openrouter",
+    "reason": "rate_limited",
+    "model": "openai/gpt-5"
+  }
+}
+```
+
 Auto-summary:
 
 - If input exceeds `SUMMARY_THRESHOLD_TOKENS`, the response includes a top-level `summary` string (non-streaming only).
 
-Model validation is strict: if `model` is provided and does not map to a known cached/allowed model, the bridge returns HTTP 400.
+Model validation is configurable:
+
+- Default behavior (`MODEL_FALLBACK_TO_DEFAULT_ON_UNKNOWN` omitted, or any value other than `false`): if `model` is provided but does not map to a known cached/allowed model, the bridge silently falls back to the backend default model.
+- Strict behavior (`MODEL_FALLBACK_TO_DEFAULT_ON_UNKNOWN=false`): the bridge returns HTTP 400 with `Unknown model ...`.
+
+Emergency provider failover is separate from model validation. When `OPENROUTER_ENABLE_EMERGENCY_FALLBACK=true` and the OpenRouter credentials are configured, the bridge may internally retry the request through OpenRouter only for known emergency conditions such as missing CLI auth, rate limiting, quota exhaustion, or provider unavailability. It does not retry generic application errors.
 
 ## Audio / Whisper (`/v1/audio`, requires auth + a plan that includes Whisper)
 
