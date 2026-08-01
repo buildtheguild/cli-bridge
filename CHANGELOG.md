@@ -4,6 +4,39 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.2.2] - 2026-08-01
+
+Emergency OpenRouter failover is now available as an opt-in rescue path for the existing chat endpoints. When the active CLI backend hits a known hard failure such as missing auth, rate limiting, quota exhaustion, or provider unavailability, the bridge can retry that same request internally through OpenRouter without adding any new public route.
+
+### Added
+
+- **Optional emergency OpenRouter fallback for chat requests** - `POST /v1/chat/completions`, streaming chat, and `POST /v1/chat/completions/upload` can now fail over internally to OpenRouter when `OPENROUTER_ENABLE_EMERGENCY_FALLBACK=true` and the OpenRouter credentials are configured. This path is intentionally narrow and only activates for known emergency conditions such as missing CLI auth, `429`/rate-limit failures, quota exhaustion, or provider timeout/unavailability.
+- **`provider_fallback` response metadata** - when a request is rescued by OpenRouter, the successful response now includes a top-level `provider_fallback` object describing the original backend, the fallback provider, the reason, and the OpenRouter model that handled the request.
+
+### Changed
+
+- **Emergency fallback is main-request only** - internal housekeeping calls such as auto-summary generation and startup model-refresh probes do not use OpenRouter fallback, even when it is enabled, so credits are only spent for real user-facing chat requests.
+
+### Docs
+
+- Documented the OpenRouter emergency-fallback env vars and response shape in the main config/endpoints references, the root README, and the Docker Hub / GitHub readmes.
+
+## [2.2.1] - 2026-08-01
+
+OpenAI-compatible model selection now survives backend switches more gracefully: if a client keeps sending the previous provider's model id after you flip `BACKEND` from Claude to Codex or vice versa, the request can now fall back to the active backend's default model instead of hard-failing.
+
+### Added
+
+- **Configurable model fallback for OpenAI-compatible chat requests** - `POST /v1/chat/completions` and `POST /v1/chat/completions/upload` now support `MODEL_FALLBACK_TO_DEFAULT_ON_UNKNOWN`. If the variable is omitted, fallback stays enabled by default; set it to `false` to disable it. When enabled, an unknown requested `model` no longer has to be rejected outright: the bridge ignores the stale or foreign model id and uses the active backend's default model instead. This is mainly aimed at automation clients like n8n that may keep sending `claude-sonnet-4-6` after the bridge has been switched to `BACKEND=codex`, or a `gpt-*` id after switching back to `BACKEND=claude`.
+
+### Changed
+
+- **Successful fallback is now visible in the JSON response** - when the bridge accepts a request by falling back, the OpenAI-compatible response includes a top-level `model_fallback` object describing the original requested model, the model actually used, and why the fallback happened. This makes the behavior explicit to upstream automations instead of silently masking the mismatch.
+
+### Docs
+
+- Documented the fallback behavior, response shape, and env toggle in the main configuration and endpoint references, and called it out in the Docker Hub and GitHub readmes so operators know what happens after switching providers on a live instance.
+
 ## [2.2.0] – 2026-07-29
 
 Operator-console safety and diagnostics pass: destructive actions now confirm before running, CLI authentication is easier to complete, and the Requests/Failure Rate metrics no longer get permanently skewed by the bridge's own internal housekeeping calls.
