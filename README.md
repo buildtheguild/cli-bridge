@@ -16,9 +16,9 @@ Audio sent to `POST /v1/audio/transcriptions` is transcribed entirely inside the
 
 | Tag                      | CLI backends   | Notes                                          |
 | ------------------------ | -------------- | ----------------------------------------------- |
-| `latest`, `2.2.0`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
-| `claude`, `2.2.0-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
-| `codex`, `2.2.0-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
+| `latest`, `2.2.2`        | Codex + Claude | Includes whisper.cpp + baked-in Whisper model   |
+| `claude`, `2.2.2-claude` | Claude only    | Includes whisper.cpp + baked-in Whisper model   |
+| `codex`, `2.2.2-codex`   | Codex only     | Includes whisper.cpp + baked-in Whisper model   |
 
 As of `2.0.0`, every tag also bundles `whisper.cpp` and a baked-in Whisper model (`base` by default). The `claude` variant measures ~340MB; `codex` and the combined `latest`/`full` image are in a similar range, a bit larger for `full` since it installs both CLIs. Whisper adds roughly the size of the baked-in model on top of that (~150MB for `base`) — see [Audio transcription](#7-audio-transcription-optional-plan-gated) below to change the baked-in model size, or swap models at runtime without rebuilding.
 
@@ -69,7 +69,7 @@ Values defined under `environment:` take precedence over values from `env_file`,
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.2.0-codex
+    image: thebuildguild/cli-bridge:2.2.2-codex
     ports:
       - "3900:3900"
     env_file:
@@ -92,7 +92,7 @@ volumes:
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.2.0-claude
+    image: thebuildguild/cli-bridge:2.2.2-claude
     ports:
       - "3900:3900"
     env_file:
@@ -117,7 +117,7 @@ Both CLIs are installed, but only one backend is active at a time.
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.2.0
+    image: thebuildguild/cli-bridge:2.2.2
     ports:
       - "3900:3900"
     env_file:
@@ -324,6 +324,73 @@ curl http://localhost:3900/v1/audio/transcriptions \
 ```
 
 An undownloaded or unknown model name returns a clear `400` rather than silently falling back or triggering a multi-minute download mid-request. Omitting `model` (or sending OpenAI's fixed `"whisper-1"` placeholder) uses whichever model is currently active.
+
+### Model selection after backend switches
+
+As of `2.2.1`, OpenAI-compatible chat requests are more forgiving when you've switched the bridge from one provider to the other but an upstream automation is still sending the old provider's model id.
+
+Example: if the bridge is now running with `BACKEND=codex` but your n8n workflow still sends `claude-sonnet-4-6`, or the bridge is running with `BACKEND=claude` but the caller still sends `gpt-5.5`, the request can fall back to the active backend's default model instead of failing with `Unknown model ...`.
+
+This behavior is controlled by:
+
+```dotenv
+MODEL_FALLBACK_TO_DEFAULT_ON_UNKNOWN=true
+```
+
+It is enabled by default, including when the variable is missing from `.env`. Set it to `false` if you want strict model validation again.
+
+When fallback happens, the successful JSON response includes a top-level `model_fallback` object so the caller can detect the mismatch:
+
+```json
+{
+  "model": "gpt-5.5",
+  "model_fallback": {
+    "requested": "claude-sonnet-4-6",
+    "used": "gpt-5.5",
+    "reason": "unknown_model",
+    "message": "Requested model 'claude-sonnet-4-6' is not available for the active backend, so the server default model was used instead."
+  }
+}
+```
+
+### Emergency OpenRouter fallback
+
+As of `2.2.2`, the bridge can also fail over internally to OpenRouter for the main chat request path, but only if you opt in explicitly:
+
+```dotenv
+OPENROUTER_ENABLE_EMERGENCY_FALLBACK=true
+OPENROUTER_API_KEY=...
+OPENROUTER_DEFAULT_MODEL=openai/gpt-5
+```
+
+Optional:
+
+```dotenv
+OPENROUTER_FALLBACK_MODELS=anthropic/claude-sonnet-4.5,google/gemini-2.5-pro
+OPENROUTER_TIMEOUT_MS=45000
+```
+
+This is intentionally **emergency-only**. It does not add any new public endpoint, and it does not activate for generic bridge errors. It only retries through OpenRouter when the active CLI request fails with a known hard condition such as:
+
+* missing CLI authentication
+* provider rate limiting (`429`)
+* provider quota exhaustion / usage-limit failure
+* provider timeout or unavailability
+
+Successful responses include a `provider_fallback` object so the caller can see that OpenRouter handled the request:
+
+```json
+{
+  "provider_fallback": {
+    "from": "codex",
+    "to": "openrouter",
+    "reason": "rate_limited",
+    "model": "openai/gpt-5"
+  }
+}
+```
+
+This uses OpenRouter API credits, not your Codex/Claude subscription quota, so leave it disabled unless you intentionally want that emergency path.
 
 #### Diagnosing failures
 
@@ -558,6 +625,22 @@ Example:
 ```dotenv
 CLAUDE_ALLOWED_MODELS=claude-sonnet-4-6,claude-opus-4-6
 ```
+
+### Emergency OpenRouter fallback
+
+Optional, disabled by default:
+
+```dotenv
+OPENROUTER_ENABLE_EMERGENCY_FALLBACK=false
+OPENROUTER_API_KEY=
+OPENROUTER_DEFAULT_MODEL=
+OPENROUTER_FALLBACK_MODELS=
+OPENROUTER_TIMEOUT_MS=45000
+OPENROUTER_HTTP_REFERER=
+OPENROUTER_TITLE=
+```
+
+When enabled, the bridge can internally retry only the main chat request through OpenRouter after known emergency failures from the active CLI backend. Successful responses include `provider_fallback` so callers can detect that OpenRouter handled the request.
 
 ### Audio transcription (Whisper)
 
@@ -810,7 +893,7 @@ GET /
 * Authentication and activation state are stored in the Docker volume mounted at `/data`.
 * Keep the `cli_data` volume persistent between container restarts and upgrades.
 * Do not run `docker compose down -v` unless you intentionally want to erase the activation and CLI authentication state.
-* Use image version `2.2.0` or newer.
+* Use image version `2.2.2` or newer.
 * Use a versioned Docker image tag in production instead of relying on `latest`.
 * The combined image contains both CLIs but only one backend can process requests at a time. Whisper audio transcription is available regardless of which backend is selected.
 * Protect `BRIDGE_TOKEN` as you would protect an API key.
