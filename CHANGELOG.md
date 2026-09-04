@@ -4,6 +4,82 @@ All notable changes to this project are documented here.
 
 ---
 
+## [2.3.0] - 2026-09-03
+
+Concurrent requests no longer fail when several arrive together, vision uploads accept real
+camera photos, and the licence enforcement chain is hardened against runtime tampering.
+
+The trigger was a webhook workflow: five WhatsApp messages arriving at once produced three
+escalations and two late replies, because request concurrency was gated on the licence's
+device-seat count and rejected the overflow instantly with `429`.
+
+### Added
+
+- **`max_concurrent_requests` as its own plan limit** - how many chat requests may be in
+  flight is now a dedicated dimension in the SaaS policy response, separate from
+  `active_devices`. `-1` means unlimited. A backend that does not send the field yet falls
+  back to a small safe number rather than to the seat count.
+- **Admission queueing** - requests over the limit now wait in FIFO order for a free slot
+  instead of being rejected outright, so a burst of webhook deliveries drains at the licensed
+  rate. `QUEUE_WAIT_MS` (default 60000, `0` restores fail-fast) bounds the wait and
+  `MAX_QUEUE_DEPTH` (default 100) sheds load beyond it. Capacity `429`s now carry
+  `Retry-After`.
+- **`MAX_CONCURRENT_REQUESTS`** - local ceiling that can only lower the plan limit, never
+  raise it, for deployments smaller than the plan allows.
+- **`queuedRequests` in `GET /v1/metrics`** - alongside `activeSessions` and `sessionLimit`.
+- **Configurable HTTP body limits** - `MAX_BODY_BYTES` for `/v1/chat/*` (derived from the
+  image limits when unset) and `MAX_DEFAULT_BODY_BYTES` (default 1MB) for every other route.
+- **Runtime anti-tamper enforcement** - the bridge refuses to start when the licence chain
+  has been modified: code-injection flags (`--require`, `--import`, `--loader`, `--inspect*`)
+  via CLI or `NODE_OPTIONS`, sealed licence prototypes, a compiled-function check that
+  detects any plain-JavaScript replacement, and SHA-256 hashes of every protected `dist` file
+  pinned into the native addon. `getConfig()` enforces those hashes itself and withholds the
+  licence server URL when they fail.
+- **Optional TLS key pinning** - `LICENSE_SPKI_PINS` (comma-separated base64 SHA-256 SPKI
+  hashes) rejects any licence-server certificate chain matching none of them, however trusted
+  its CA. Disabled when no pins are baked in, and an unpinned build takes the previous
+  request path unchanged.
+- **`npm run verify:integrity`** and `npm run build:all`.
+
+### Fixed
+
+- **Request concurrency was gated on the device-seat count** - `active_devices` was reused as
+  the in-flight request limit, so a one-seat licence silently serialised every caller and
+  `429`d anything arriving while a request was already running.
+- **A leaked concurrency slot on every oversized streaming prompt** - in `chatStream` the
+  token counting and the "prompt too large" rejection ran between acquiring a slot and the
+  `try`/`finally` that released it, so each such failure burned a slot permanently until
+  restart.
+- **Images were capped at Express's 100kb default body limit** - a 4MB camera photo is ~5.5MB
+  once base64-encoded into a JSON data URI and was rejected with a bare `413` before any
+  image validation ran, which read as a far smaller limit than `MAX_IMAGE_BYTES` implied.
+- **`QUEUE_WAIT_MS=0` was ignored** - the shared `envNumber` helper treats `0` as unset, so
+  the documented fail-fast value silently became the 60s default.
+- **Concurrency failed open before the first policy check** - the status flips to `valid`
+  before the entitlement check runs and that check's failure is only logged, so seeding the
+  generous fallback let anyone blocking `/v1/policy/check` run at it. It now starts at 1.
+
+### Changed
+
+- **`MAX_IMAGE_FILES` default raised from 4 to 10**, and it is now enforced on the JSON route
+  as well as the multipart one. A request carrying more images than allowed is rejected with
+  the count named rather than silently truncated.
+- **`MAX_IMAGE_BYTES` is now configurable** (default 10MB, unchanged) instead of hardcoded.
+- **`LicenseState.maxConcurrentSessions` split** into `maxDevices` and
+  `maxConcurrentRequests`. The operator console showed the old field as a device count while
+  the runtime used it as a request gate.
+- **Build order is enforced by tooling** - `npm run build` now re-pins the addon's file
+  hashes and verifies the result, `gen-constants.js` refuses to produce an unpinned addon,
+  and the Dockerfile fails the build if pinning is off or the placeholder licence URL was
+  baked in. `gen-constants.js` also reuses the URL, slug and pins already present when the
+  corresponding env vars are unset.
+
+### Docs
+
+- Documented the concurrency, queueing, body-size and image limits in `docs/config.md` and
+  `docs/license.md`, and the anti-tamper layers, TLS pinning and build order in
+  `docs/licensing-architecture.md`.
+
 ## [2.2.2] - 2026-08-01
 
 Emergency OpenRouter failover is now available as an opt-in rescue path for the existing chat endpoints. When the active CLI backend hits a known hard failure such as missing auth, rate limiting, quota exhaustion, or provider unavailability, the bridge can retry that same request internally through OpenRouter without adding any new public route.
