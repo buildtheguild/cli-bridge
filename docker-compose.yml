@@ -1,18 +1,38 @@
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:1.6.2-claude
+    container_name: cli-bridge
+    image: ${CLI_BRIDGE_IMAGE:-cli-bridge:latest}
     ports:
       - "3900:3900"
     env_file:
       - .env
     environment:
       PORT: 3900
-      BACKEND: claude
+      # Switch AI backend here — no rebuild needed, just: docker compose up -d
+      BACKEND: claude   # codex | claude
+      # Override Windows paths from .env with the in-container binary names
+      CODEX_BIN: codex
       CLAUDE_BIN: claude
       API_DOCS_SERVERS: http://localhost:3900,https://your.domain.com
+
+      VIRTUAL_HOST: your.domain.com  # Replace with your domain
+      VIRTUAL_PORT: 3900
+      LETSENCRYPT_HOST: your.domain.com
+      LETSENCRYPT_EMAIL: your@email.com
+
     volumes:
-      - cli_data:/data
+      - codex_data:/data
     restart: unless-stopped
 
+    networks:
+      - proxy-net
+      - egress
+
 volumes:
-  cli_data:
+  codex_data:
+
+networks:
+  proxy-net:
+    external: true
+  egress:
+    driver: bridge
