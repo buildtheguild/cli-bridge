@@ -131,6 +131,37 @@ If your n8n Agent depends on model-native tool calling, test it separately befor
 
 ---
 
+## Concurrent executions
+
+If a trigger can fire several executions at once — a webhook receiving a burst of messages,
+or a Split In Batches node — they all reach CLIBridge simultaneously.
+
+How many run at once is governed by your plan's request-concurrency limit. Requests beyond
+it **wait for a free slot rather than failing**, so a burst drains at the licensed rate
+instead of erroring.
+
+You only receive `429 Too Many Requests` if no slot frees within the server's queue wait, or
+the queue is full. Those responses include a `Retry-After` header.
+
+Two settings matter on the n8n side:
+
+- **Do not set an aggressive retry** on the HTTP/OpenAI node. Requests already queue
+  server-side, so retrying a slow-but-pending burst only adds more work. If you do retry,
+  honour `Retry-After` and add jitter so parallel executions do not retry in lockstep.
+- **Raise the node timeout** above the expected queue wait. A queued request can legitimately
+  sit for a while before it starts, and a short client timeout will cancel it while it is
+  still waiting its turn.
+
+To see whether the limit is your bottleneck, call `GET /v1/metrics`:
+
+```json
+{ "activeSessions": 10, "queuedRequests": 4, "sessionLimit": 10 }
+```
+
+Sustained `queuedRequests > 0` means executions are waiting on the concurrency limit.
+
+---
+
 ## Troubleshooting
 
 ### n8n shows a `/responses` error
