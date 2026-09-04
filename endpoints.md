@@ -88,7 +88,7 @@ All CLI-auth and CLI-update routes are additionally rate-limited per source IP.
 
 - `GET /v1/health` — basic `{ ok, time }`; `?details=true` (requires `HEALTH_VERBOSE_ENABLED=true`) adds version, memory, `cli`, `whisper`, `watchdog`, `license`. `cli.quotaLeft` is always `null` — neither CLI exposes machine-readable remaining quota.
 - `GET /v1/watchdog/status` — watchdog config + consecutive unhealthy check count
-- `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`. Lightweight — no AI calls. Reflects real `/v1/chat/completions`-family traffic only; the periodic insights report's own chat call (see `docs/config.md`) is excluded so its success/failure never shows up here — check `GET /v1/logs` for that instead.
+- `GET /v1/metrics` — live in-memory counters: `totalRequests`, `chatRequests`, `streamRequests`, `failedRequests`, `totalInputTokens`, `totalOutputTokens`, `activeSessions`, `sessionLimit`, `queuedRequests`. `sessionLimit` is the plan's `max_concurrent_requests` narrowed by any local `MAX_CONCURRENT_REQUESTS`; `queuedRequests` is how many callers are parked waiting for a slot. Together they show whether a burst is being absorbed by the queue or is about to start timing out. Lightweight — no AI calls. Reflects real `/v1/chat/completions`-family traffic only; the periodic insights report's own chat call (see `docs/config.md`) is excluded so its success/failure never shows up here — check `GET /v1/logs` for that instead.
 - `GET /v1/logs?limit=100` — in-memory ring buffer (max 200) of `{ id, timestamp, level, context, message }`, newest first. Populated by Codex/Claude chat and streaming request failures (`context: "Codex"`/`"Claude"`) and the Whisper module's failure points (decode failures, missing-model errors, whisper-cli failures/timeouts, model-download failures/retries, `context: "Whisper"`) — not a full application log, just these operator-relevant failure points. Resets on restart; not persisted anywhere. Guarded by `AuthGuard` only — no Whisper plan entitlement required, since it's not itself a Whisper feature.
 - `GET /v1/insights/latest` — most recent insight report, or `null`
 - `GET /v1/insights/history?limit=10` — last N reports, newest first
@@ -136,10 +136,10 @@ Image inputs (multiple images supported):
 - `messages[].content` may be an array of parts. Include a part with `type: "image_url"` (or `input_image`) and `image_url: { "url": "https://..." }` or a data URI.
 - Each image is downloaded server-side (http/https or data URI).
 - Max size per image: 10 MB.
-- Multipart upload (single image) for testing:
+- Multipart upload for testing (multiple images supported):
   - `POST /v1/chat/completions/upload`
   - `messages` is a JSON string
-  - `imageFile` is a binary file field
+  - `imageFiles` is one or more binary file fields (up to `MAX_IMAGE_FILES`, default 10)
   - `stream` is not supported on this endpoint
 
 Streaming returns OpenAI-style SSE chunks (`chat.completion.chunk`) and ends with `data: [DONE]`.
