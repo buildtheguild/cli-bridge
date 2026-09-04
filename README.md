@@ -47,8 +47,9 @@ Your application sends an OpenAI-style Chat Completions request, and CLIBridge r
 - OpenAI-compatible `GET /v1/models`
 - JSON and SSE streaming responses
 - System, developer, user, assistant, and tool message roles
-- Image input through URL or data URI
+- Image input through URL or data URI (up to 10 images per request)
 - Multipart image-upload endpoint for testing
+- Concurrent requests queue for a free slot instead of failing
 - Codex CLI backend
 - Claude Code CLI backend
 - Docker-first deployment
@@ -59,6 +60,42 @@ Your application sends an OpenAI-style Chat Completions request, and CLIBridge r
 - Rate limiting and operational safeguards
 - Optional local Whisper transcription
 - Downloadable/switchable Whisper models with persistent storage
+
+---
+
+## Concurrent requests
+
+How many chat requests may run at once comes from your plan, and is a separate limit from
+how many devices the licence may be installed on.
+
+Requests beyond that limit **queue for a free slot rather than failing**, so a burst of
+webhook deliveries — several chat messages arriving at the same moment, say — drains at the
+licensed rate instead of returning `429`s that the caller retries in lockstep.
+
+A `429` is returned only when no slot frees within `QUEUE_WAIT_MS` (default 60s) or the
+queue is already `MAX_QUEUE_DEPTH` deep. Those responses carry a `Retry-After` header, so a
+well-behaved client backs off on its own.
+
+`GET /v1/metrics` reports `activeSessions`, `queuedRequests` and `sessionLimit`. Sustained
+`queuedRequests > 0` means the concurrency limit is your bottleneck, not the bridge.
+
+`MAX_CONCURRENT_REQUESTS` can lower the limit locally — useful on a small VPS — but never
+raise it above what the plan allows.
+
+---
+
+## Vision / image uploads
+
+Up to `MAX_IMAGE_FILES` images per request (default 10), each up to `MAX_IMAGE_BYTES`
+(default 10MB) — comfortably above a typical 3-4MB phone photo. Send them as base64 data
+URIs in JSON, as `https://` URLs, or as multipart uploads.
+
+Base64 encoding inflates an image by about a third, so the JSON body limit for `/v1/chat/*`
+is sized from those two settings. Override it with `MAX_BODY_BYTES` if needed.
+
+If a reverse proxy sits in front of CLIBridge, raise its limit too — nginx's
+`client_max_body_size` defaults to 1MB and will reject a photo upload before it ever reaches
+the bridge.
 
 ---
 
@@ -116,9 +153,9 @@ A client may still be usable if it only sends the fields CLIBridge supports, or 
 
 | Tag | CLI backends | Notes |
 |---|---|---|
-| `latest`, `2.2.2` | Codex + Claude | Includes both CLIs plus `whisper.cpp`; one CLI backend is active at a time. |
-| `codex`, `2.2.2-codex` | Codex only | Smaller single-backend image. |
-| `claude`, `2.2.2-claude` | Claude only | Smaller single-backend image. |
+| `latest`, `2.3.0` | Codex + Claude | Includes both CLIs plus `whisper.cpp`; one CLI backend is active at a time. |
+| `codex`, `2.3.0-codex` | Codex only | Smaller single-backend image. |
+| `claude`, `2.3.0-claude` | Claude only | Smaller single-backend image. |
 
 Use a **versioned tag** in production.
 
@@ -166,7 +203,7 @@ The combined image is convenient if you may switch between Codex and Claude late
 ```yaml
 services:
   cli-bridge:
-    image: thebuildguild/cli-bridge:2.2.2
+    image: thebuildguild/cli-bridge:2.3.0
     container_name: cli-bridge
     ports:
       - "3900:3900"
@@ -186,7 +223,7 @@ volumes:
   cli_data:
 ```
 
-If you only need one backend, use the `2.2.2-codex` or `2.2.2-claude` image instead.
+If you only need one backend, use the `2.3.0-codex` or `2.3.0-claude` image instead.
 
 ---
 
